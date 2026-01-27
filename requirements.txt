@@ -1,0 +1,12 @@
+python-telegram-bot==21.0.1
+Flask-SQLAlchemy
+python-dotenv
+vnstock==3.4.0
+pandas
+APScheduler
+pytz
+beautifulsoup4
+playwright
+psycopg2-binary
+sendgrid==6.11.0
+numpy>=1.21.6,<1.28.0
