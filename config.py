@@ -18,3 +18,6 @@ class Config:
     
     # Secret Key
     SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
+    
+    # VNStock Data Sources (comma-separated priority list)
+    VNSTOCK_DATA_SOURCES = os.getenv("VNSTOCK_DATA_SOURCES", "TCBS,VCI,MSN").split(',')

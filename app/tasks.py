@@ -10,10 +10,14 @@ import pandas as pd
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from config import Config
 
 # Bỏ qua SSL verification cho vnstock (tạm thời fix lỗi SSL)
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Danh sách các nguồn dữ liệu để thử (theo thứ tự ưu tiên)
+DATA_SOURCES = Config.VNSTOCK_DATA_SOURCES
 
 
 def _get_fireant_in_thread(symbol: str) -> str:
@@ -93,56 +97,64 @@ def get_total_value_from_fireant(symbol: str) -> str:
 def index_change_str(symbol: str, today_query: str) -> str:
     """
     Lấy thông tin chỉ số VN-Index hoặc HNX-Index từ vnstock quote API.
+    Thử nhiều nguồn dữ liệu khác nhau để tránh lỗi 403.
     """
     print(f"🔍 Đang lấy dữ liệu cho {symbol}...")
-    try:
-        # Dùng VCI source vì TCBS không hỗ trợ chỉ số
-        stock = Vnstock(symbol=symbol, source='VCI').stock()
-        
-        # Lấy lịch sử 5 ngày gần nhất để có ít nhất 2 phiên
-        start_dt = (datetime.datetime.now() - datetime.timedelta(days=5)).strftime("%Y-%m-%d")
-        df = stock.quote.history(symbol=symbol, start=start_dt, end=today_query, interval='1D')
-        
-        if df is None or len(df) < 1:
-            print(f"⚠️ Không có dữ liệu lịch sử cho {symbol}")
-            return f"Không có dữ liệu {symbol}."
-        
-        # Lấy phiên gần nhất
-        last_row = df.iloc[-1]
-        close = float(last_row['close'])
-        volume = float(last_row.get('volume', 0)) / 1e6
-        
-        # Tính delta nếu có ít nhất 2 phiên
-        if len(df) >= 2:
-            prev_close = float(df.iloc[-2]['close'])
-            delta = close - prev_close
-        else:
-            # Nếu chỉ có 1 phiên, dùng open làm tham chiếu
-            open_price = float(last_row.get('open', close))
-            delta = close - open_price
-        
-        print(f"✅ {symbol}: close={close}, delta={delta}, volume={volume}")
-        
-        s = f"{close:,.2f} điểm -"
-        if delta > 0:
-            s += f" tăng {delta:,.2f} điểm"
-        elif delta < 0:
-            s += f" giảm {abs(delta):,.2f} điểm"
-        else:
-            s += " không thay đổi"
-        
-        # Lấy tổng giá trị từ FireAnt
-        total_value_fireant = get_total_value_from_fireant(symbol)
-        s += f" - Tổng giá trị giao dịch: {total_value_fireant}"
-        s += f" - Tổng khối lượng giao dịch: {volume:,.1f} triệu cổ phiếu"
-        
-        return s
-        
-    except Exception as e:
-        print(f"❌ Lỗi lấy chỉ số {symbol}: {e}")
-        import traceback
-        traceback.print_exc()
-        return f"Không có dữ liệu {symbol}."
+    
+    # Thử từng nguồn dữ liệu cho đến khi thành công
+    last_error = None
+    for source in DATA_SOURCES:
+        try:
+            print(f"🔄 Thử nguồn {source} cho {symbol}...")
+            stock = Vnstock(symbol=symbol, source=source).stock()
+            
+            # Lấy lịch sử 5 ngày gần nhất để có ít nhất 2 phiên
+            start_dt = (datetime.datetime.now() - datetime.timedelta(days=5)).strftime("%Y-%m-%d")
+            df = stock.quote.history(symbol=symbol, start=start_dt, end=today_query, interval='1D')
+            
+            if df is None or len(df) < 1:
+                print(f"⚠️ Không có dữ liệu lịch sử cho {symbol} từ {source}")
+                continue
+            
+            # Lấy phiên gần nhất
+            last_row = df.iloc[-1]
+            close = float(last_row['close'])
+            volume = float(last_row.get('volume', 0)) / 1e6
+            
+            # Tính delta nếu có ít nhất 2 phiên
+            if len(df) >= 2:
+                prev_close = float(df.iloc[-2]['close'])
+                delta = close - prev_close
+            else:
+                # Nếu chỉ có 1 phiên, dùng open làm tham chiếu
+                open_price = float(last_row.get('open', close))
+                delta = close - open_price
+            
+            print(f"✅ {symbol} (nguồn {source}): close={close}, delta={delta}, volume={volume}")
+            
+            s = f"{close:,.2f} điểm -"
+            if delta > 0:
+                s += f" tăng {delta:,.2f} điểm"
+            elif delta < 0:
+                s += f" giảm {abs(delta):,.2f} điểm"
+            else:
+                s += " không thay đổi"
+            
+            # Lấy tổng giá trị từ FireAnt
+            total_value_fireant = get_total_value_from_fireant(symbol)
+            s += f" - Tổng giá trị giao dịch: {total_value_fireant}"
+            s += f" - Tổng khối lượng giao dịch: {volume:,.1f} triệu cổ phiếu"
+            
+            return s
+            
+        except Exception as e:
+            last_error = e
+            print(f"⚠️ Lỗi với nguồn {source} cho {symbol}: {type(e).__name__}")
+            continue
+    
+    # Nếu tất cả nguồn đều thất bại
+    print(f"❌ Lỗi lấy chỉ số {symbol} từ tất cả nguồn: {last_error}")
+    return f"Không có dữ liệu {symbol}."
 
 
 def generate_report_text() -> str:
@@ -177,22 +189,38 @@ def generate_report_text() -> str:
         print(f"Lỗi lấy HNX-Index: {e}")
         hnxindex_str = "Không có dữ liệu HNX-Index hôm nay."
     
-    # Lấy bảng giá - Sử dụng Trading API trực tiếp
+    # Lấy bảng giá - Thử nhiều nguồn dữ liệu
+    df = None
+    last_error = None
+    
+    for source in DATA_SOURCES:
+        try:
+            print(f"🔄 Thử lấy bảng giá từ nguồn {source}...")
+            trading = Trading(source=source)
+            df = trading.price_board(codes)
+            print(f"✅ Lấy bảng giá thành công từ {source} cho {len(codes)} mã")
+            break  # Thành công, thoát vòng lặp
+        except Exception as e:
+            last_error = e
+            print(f"⚠️ Lỗi với nguồn {source}: {type(e).__name__}: {e}")
+            continue
+    
+    # Nếu tất cả nguồn đều thất bại
+    if df is None:
+        print(f"❌ Lỗi lấy bảng giá từ tất cả nguồn: {last_error}")
+        return f"❌ Không thể lấy dữ liệu thị trường. Vui lòng thử lại sau."
+    
     try:
-        trading = Trading(source='VCI')
-        df = trading.price_board(codes)
-        print(f"✅ Lấy bảng giá thành công cho {len(codes)} mã")
-        
         # Flatten MultiIndex columns: ('match', 'match_price') -> 'match_price'
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = ['_'.join(col).strip('_') if col[1] else col[0] for col in df.columns.values]
         
         print(f"DEBUG - Columns after flatten: {df.columns.tolist()[:20]}")
     except Exception as e:
-        print(f"❌ Lỗi lấy bảng giá: {type(e).__name__}: {e}")
+        print(f"❌ Lỗi xử lý cột: {e}")
         import traceback
         traceback.print_exc()
-        return f"❌ Lỗi khi lấy dữ liệu: {str(e)}"
+        return f"❌ Lỗi khi xử lý dữ liệu: {str(e)}"
     
     # Tính giá thay đổi: match_price - ref_price
     df['price_change'] = df['match_match_price'] - df['listing_ref_price']
