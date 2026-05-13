@@ -379,6 +379,10 @@ def main():
     flask_thread.start()
     logger.info(f"Flask health server started on port {port}")
 
+    # Python 3.14 no longer auto-creates an event loop; set one explicitly
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     # Run the bot
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
