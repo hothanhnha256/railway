@@ -5,6 +5,7 @@ Allows users to add/remove stock symbols and receive reports via Telegram
 import os
 import asyncio
 import logging
+import threading
 from datetime import time as dt_time
 from telegram import Update
 from telegram.ext import (
@@ -29,6 +30,11 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.config.from_object(Config)
 db.init_app(app)
+
+
+@app.route('/')
+def health():
+    return 'OK', 200
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -373,6 +379,15 @@ def main():
     print("="*50)
     print("✅ Bot đang chạy! Nhấn Ctrl+C để dừng.\n")
     
+    # Start Flask in background thread so Render detects an open port
+    port = int(os.environ.get('PORT', 5000))
+    flask_thread = threading.Thread(
+        target=lambda: app.run(host='0.0.0.0', port=port),
+        daemon=True
+    )
+    flask_thread.start()
+    logger.info(f"Flask health server started on port {port}")
+
     # Run the bot
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
