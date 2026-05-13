@@ -6,13 +6,13 @@ import os
 import asyncio
 import logging
 import threading
-from datetime import time as dt_time
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import (
     Application,
     CommandHandler,
     ContextTypes,
 )
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from flask import Flask
 from config import Config
 from app.models import db, StockSymbol, TelegramUser
@@ -263,35 +263,26 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 
-async def send_scheduled_report(context: ContextTypes.DEFAULT_TYPE):
-    """Send report to all registered users (called by scheduler)"""
+async def send_scheduled_report(bot: Bot):
+    """Send report to all registered users (called by APScheduler)"""
     logger.info("🕐 Starting scheduled report...")
-    
+
     with app.app_context():
         try:
-            # Generate report
             report_text = generate_report_text()
-            
-            # Get all active users
             users = TelegramUser.query.filter_by(is_active=True).all()
-            
+
             if not users:
                 logger.warning("No active users to send report to")
                 return
-            
+
             logger.info(f"Sending report to {len(users)} users")
-            
-            # Send to all users
+
             for user in users:
                 try:
-                    # Split message if too long
                     if len(report_text) <= 4096:
-                        await context.bot.send_message(
-                            chat_id=user.chat_id,
-                            text=report_text
-                        )
+                        await bot.send_message(chat_id=user.chat_id, text=report_text)
                     else:
-                        # Split into chunks
                         chunks = []
                         current_chunk = ""
                         for line in report_text.split('\n'):
@@ -302,21 +293,18 @@ async def send_scheduled_report(context: ContextTypes.DEFAULT_TYPE):
                                 current_chunk = line + '\n'
                         if current_chunk:
                             chunks.append(current_chunk)
-                        
+
                         for chunk in chunks:
-                            await context.bot.send_message(
-                                chat_id=user.chat_id,
-                                text=chunk
-                            )
+                            await bot.send_message(chat_id=user.chat_id, text=chunk)
                             await asyncio.sleep(0.5)
-                    
+
                     logger.info(f"✅ Sent report to chat_id: {user.chat_id}")
-                    
+
                 except Exception as e:
                     logger.error(f"❌ Error sending to chat_id {user.chat_id}: {e}")
-            
+
             logger.info("✅ Scheduled report completed")
-            
+
         except Exception as e:
             logger.error(f"❌ Error in scheduled report: {e}")
 
@@ -338,9 +326,34 @@ def main():
         db.create_all()
         logger.info("✅ Database initialized")
     
-    # Create application
-    application = Application.builder().token(token).build()
-    
+    vietnam_tz = pytz.timezone(Config.TIMEZONE)
+
+    async def post_init(application: Application) -> None:
+        scheduler = AsyncIOScheduler(timezone=vietnam_tz)
+        scheduler.add_job(
+            send_scheduled_report,
+            'cron', hour=9, minute=0,
+            kwargs={'bot': application.bot},
+            name="morning_report"
+        )
+        scheduler.add_job(
+            send_scheduled_report,
+            'cron', hour=15, minute=30,
+            kwargs={'bot': application.bot},
+            name="afternoon_report"
+        )
+        scheduler.start()
+        logger.info("📅 APScheduler started: 9:00 AM & 3:30 PM")
+
+    # job_queue(None) disables the built-in JobQueue (fixes Python 3.14 weakref error)
+    application = (
+        Application.builder()
+        .token(token)
+        .job_queue(None)
+        .post_init(post_init)
+        .build()
+    )
+
     # Add command handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
@@ -348,37 +361,15 @@ def main():
     application.add_handler(CommandHandler("add", add_symbol_command))
     application.add_handler(CommandHandler("remove", remove_symbol_command))
     application.add_handler(CommandHandler("report", report_command))
-    
-    # Schedule automatic reports
-    # Morning report at 9:00 AM Vietnam time
-    vietnam_tz = pytz.timezone(Config.TIMEZONE)
-    job_queue = application.job_queue
-    
-    # Morning report - 9:00 AM
-    job_queue.run_daily(
-        send_scheduled_report,
-        time=dt_time(hour=9, minute=0, tzinfo=vietnam_tz),
-        name="morning_report"
-    )
-    logger.info("📅 Scheduled morning report at 9:00 AM")
-    
-    # Afternoon report - 3:30 PM
-    job_queue.run_daily(
-        send_scheduled_report,
-        time=dt_time(hour=15, minute=30, tzinfo=vietnam_tz),
-        name="afternoon_report"
-    )
-    logger.info("📅 Scheduled afternoon report at 3:30 PM")
-    
-    # Start the bot
+
     logger.info("🤖 Bot is starting...")
     print("\n" + "="*50)
     print("🤖 STOCK REPORT BOT IS RUNNING!")
     print("="*50)
-    print(f"⏰ Scheduled reports: 9:00 AM & 3:30 PM")
+    print("⏰ Scheduled reports: 9:00 AM & 3:30 PM")
     print("="*50)
     print("✅ Bot đang chạy! Nhấn Ctrl+C để dừng.\n")
-    
+
     # Start Flask in background thread so Render detects an open port
     port = int(os.environ.get('PORT', 5000))
     flask_thread = threading.Thread(
